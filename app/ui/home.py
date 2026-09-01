@@ -115,6 +115,36 @@ def _summary_panel(title: str, icon: str | None, path: str, entries: list[tuple[
             ui.label("Nothing to show yet.").classes("text-sm text-gray-600 mt-5 mb-3")
 
 
+def _calendar_panel(meetings: list) -> None:
+    meeting_days = {meeting.starts_at.date().isoformat() for meeting in meetings}
+    selected_day = datetime.now().astimezone().date().isoformat()
+    with ui.card().classes("cochair-surface w-full p-5"):
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.icon("calendar_month", size="sm").classes("text-primary")
+            ui.label("Meeting calendar").classes("text-lg font-semibold")
+        with ui.row().classes("w-full gap-6 flex-wrap items-start mt-3"):
+            calendar = ui.date(value=selected_day).props("flat bordered minimal").classes("min-w-72")
+            calendar.props(f':events="{sorted(meeting_days)}" event-color="primary"')
+            selection = ui.column().classes("flex-1 min-w-72 justify-center gap-2")
+
+            def refresh_selection() -> None:
+                selection.clear()
+                selected_meetings = [meeting for meeting in meetings if meeting.starts_at.date().isoformat() == calendar.value]
+                with selection:
+                    ui.label(datetime.fromisoformat(calendar.value).strftime("%A, %d %B")).classes("font-medium text-gray-700")
+                    if not selected_meetings:
+                        ui.label("No meetings scheduled for this date.").classes("text-sm text-gray-600 mt-3")
+                    else:
+                        ui.label(f"{len(selected_meetings)} meeting{'s' if len(selected_meetings) != 1 else ''} scheduled").classes("text-2xl font-semibold text-primary mt-2")
+                        ui.label("Highlighted dates indicate scheduled meetings.").classes("text-sm text-gray-600")
+                        ui.link("View meetings", "/meetings").classes("text-sm font-medium text-primary mt-2")
+
+            calendar.on("update:model-value", lambda _: refresh_selection())
+            refresh_selection()
+        if meeting_days:
+            ui.label(f"{len(meeting_days)} meeting date{'s' if len(meeting_days) != 1 else ''} scheduled").classes("text-xs text-gray-500 mt-2")
+
+
 def register_home_page() -> None:
     @ui.page("/")
     def dashboard_page() -> None:
@@ -129,6 +159,7 @@ def register_home_page() -> None:
                 _metric_card("Scheduled meetings", len(meetings), "event", "/meetings")
                 _metric_card("Agenda topics", len(topics), "format_list_bulleted", "/topics")
                 _metric_card("Minutes captured", minutes_count, "description", "/minutes")
+            _calendar_panel(meetings)
             now = datetime.now().astimezone()
             next_meetings = sorted(
                 (meeting for meeting in meetings if meeting.starts_at.astimezone() >= now),
