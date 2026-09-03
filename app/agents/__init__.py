@@ -1,1 +1,1 @@
-"""Agent integration boundaries for assisted migration workflows."""
+"""Agent integration module for assisted workflows."""

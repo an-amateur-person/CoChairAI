@@ -15,7 +15,7 @@ class TopicDraft(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str = ""
     scheduled_time: str | None = None
-    duration_minutes: int | None = Field(default=None, gt=0)
+    duration_minutes: int | None = Field(default=None, ge=0)
     board_attendees: str = ""
     cross_board_attendees: str = ""
     lead: str | None = None
@@ -30,12 +30,37 @@ class MeetingCreate(BaseModel):
     starts_at: datetime
     duration_minutes: int = Field(gt=0)
     attendees: str = ""
+    location: str = ""
     invitation_requested: bool = False
     topics: list[TopicDraft] = Field(default_factory=list)
 
 
 class MinutesDraft(MeetingCreate):
     approval_status: ApprovalStatus = ApprovalStatus.DRAFT
+
+
+class AgendaTopicLink(BaseModel):
+    topic_id: str = Field(min_length=1)
+
+
+class MeetingUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    starts_at: datetime | None = None
+    duration_minutes: int | None = Field(default=None, gt=0)
+    attendees: str | None = None
+    location: str | None = None
+    invitation_requested: bool | None = None
+
+
+class TopicUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    scheduled_time: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=0)
+    board_attendees: str | None = None
+    cross_board_attendees: str | None = None
+    lead: str | None = None
+    status: str | None = None
 
 
 class ActionRead(ActionDraft):

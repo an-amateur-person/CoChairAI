@@ -1,7 +1,7 @@
 [project]
-name = "powerplatform-python-migration"
-version = "0.1.0"
-description = "Configurable starter for migrating Power Platform solution exports to Python."
+name = "cchair-ai"
+version = "1.0.0"
+description = "CoChairAI: Meeting governance workspace for planning, minutes, and action tracking."
 requires-python = ">=3.12"
 
 [tool.pytest.ini_options]

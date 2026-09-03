@@ -1,1 +1,1 @@
-"""Power Platform migration application package."""
+"""CoChairAI application package."""

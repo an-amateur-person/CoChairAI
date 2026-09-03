@@ -1,1 +1,1 @@
-"""Business services for solution analysis and migration."""
+"""Business services for meeting governance operations."""

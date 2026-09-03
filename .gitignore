@@ -4,6 +4,4 @@ __pycache__/
 *.py[cod]
 .env
 data/*.db
-data/import/*.zip
-data/unpacked/*
-!data/unpacked/.gitkeep
+.nicegui/

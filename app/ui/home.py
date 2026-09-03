@@ -1,15 +1,28 @@
 from datetime import datetime
 
-from nicegui import ui
+from nicegui import app, ui
 
-from app.api.schemas import MeetingCreate, TopicDraft
+from app.api.schemas import MeetingCreate, MeetingUpdate, TopicDraft, TopicUpdate
 from app.config import get_settings
 from app.db import SessionLocal
-from app.services.meetings import create_meeting, create_topic, list_meetings, list_topics
+from app.services.email import EmailDeliveryError
+from app.services.meetings import (
+    add_topic_to_meeting,
+    create_meeting,
+    create_topic,
+    get_meeting,
+    list_meetings,
+    list_topics,
+    send_meeting_invite,
+    update_meeting,
+    update_topic,
+)
 
 
-def _apply_theme() -> None:
+def _apply_theme() -> ui.dark_mode:
     ui.colors(primary="#A100FF", secondary="#7500C0", accent="#FF6B00", positive="#16803C")
+    # None follows the OS/browser color scheme until the user picks a preference explicitly
+    dark_mode = ui.dark_mode(value=app.storage.user.get("dark_mode"))
     ui.add_head_html(
         """
         <style>
@@ -20,13 +33,37 @@ def _apply_theme() -> None:
             .cochair-metric { border-top: 3px solid #A100FF; box-shadow: 0 8px 24px rgba(31, 27, 36, .08); }
             .cochair-surface { border: 1px solid #E6E0EA; box-shadow: 0 8px 24px rgba(31, 27, 36, .06); }
             .cochair-table { border: 1px solid #E6E0EA; border-radius: 8px; overflow: hidden; background: white; }
+
+            /* Dark mode: deep purple undertones instead of near-black, softer contrast with brand accents */
+            body.body--dark { background: #1B1425; color: #E8E1F0; }
+            body.body--dark .cochair-header { background: #170F20; }
+            body.body--dark .cochair-brand-mark { background: #B94BFF; }
+            body.body--dark .cochair-nav-active { background: rgba(185, 75, 255, .2); }
+            body.body--dark .cochair-metric { border-top-color: #B94BFF; box-shadow: 0 8px 24px rgba(10, 4, 20, .5); }
+            body.body--dark .cochair-surface { border-color: #3D2E52; box-shadow: 0 8px 24px rgba(10, 4, 20, .4); }
+            body.body--dark .cochair-table { border-color: #3D2E52; background: #241A33; }
+            body.body--dark .q-card { background: #241A33; color: #E8E1F0; }
+            body.body--dark .q-card.cochair-metric { background: #241A33; }
+            body.body--dark .q-date { background: #241A33 !important; color: #E8E1F0; }
+            body.body--dark .q-date__header { background: #2E2144 !important; }
+            body.body--dark .q-date__calendar-item, body.body--dark .q-date__view { background: transparent; }
+            body.body--dark .text-gray-500 { color: #A99BC0 !important; }
+            body.body--dark .text-gray-600 { color: #BCAFD4 !important; }
+            body.body--dark .text-gray-700 { color: #D3C8E5 !important; }
         </style>
         """
     )
+    return dark_mode
+
+
+def _theme_icon(value: bool | None) -> str:
+    if value is None:
+        return "brightness_auto"
+    return "dark_mode" if value else "light_mode"
 
 
 def _navigation(active_path: str) -> None:
-    _apply_theme()
+    dark_mode = _apply_theme()
     ui.page_title(get_settings().app_name)
     with ui.header().classes("cochair-header items-center justify-between px-4 md:px-8 shadow-sm"):
         with ui.row().classes("items-center gap-3"):
@@ -45,12 +82,28 @@ def _navigation(active_path: str) -> None:
                 if path == active_path:
                     button.classes("cochair-nav-active")
 
+            def toggle_theme() -> None:
+                # cycle: auto (follow system) -> dark -> light -> auto
+                cycle: list[bool | None] = [None, True, False]
+                new_value = cycle[(cycle.index(dark_mode.value) + 1) % len(cycle)] if dark_mode.value in cycle else True
+                dark_mode.value = new_value
+                if new_value is None:
+                    app.storage.user.pop("dark_mode", None)
+                else:
+                    app.storage.user["dark_mode"] = new_value
+                theme_button.props(f"icon={_theme_icon(new_value)}")
+
+            theme_button = ui.button(icon=_theme_icon(dark_mode.value), on_click=toggle_theme).props("flat round")
+            theme_button.tooltip("Theme: click to cycle auto / dark / light")
+            theme_button.classes("text-white/70")
+
 
 def _meeting_rows() -> list[dict[str, str | int]]:
     with SessionLocal() as database:
         meetings = list_meetings(database)
         return [
             {
+                "id": meeting.id,
                 "title": meeting.title,
                 "starts_at": meeting.starts_at.strftime("%d %b %Y, %H:%M"),
                 "duration": meeting.duration_minutes,
@@ -69,6 +122,7 @@ def _meeting_columns(include_attendees: bool = False) -> list[dict[str, str]]:
         {"name": "duration", "label": "Minutes", "field": "duration"},
         {"name": "status", "label": "Minutes status", "field": "status"},
         {"name": "topics", "label": "Topics", "field": "topics"},
+        {"name": "actions", "label": "", "field": "actions"},
     ]
     if include_attendees:
         columns.insert(3, {"name": "attendees", "label": "Attendees", "field": "attendees", "align": "left"})
@@ -192,28 +246,150 @@ def register_home_page() -> None:
         _navigation("/meetings")
         with ui.column().classes("w-full max-w-7xl mx-auto p-6 gap-6"):
             _page_heading("Meetings", "Create and review scheduled board meetings.", "event")
-            table = ui.table(columns=_meeting_columns(include_attendees=True), rows=_meeting_rows()).classes("cochair-table w-full")
-            with ui.card().classes("cochair-surface w-full max-w-2xl p-6"):
-                with ui.row().classes("items-center gap-2"):
-                    ui.icon("add_circle", size="sm").classes("text-primary")
-                    ui.label("Schedule meeting").classes("text-lg font-semibold")
-                title = ui.input("Meeting title").classes("w-full")
-                starts_at = ui.input("Start (ISO 8601)", value=datetime.now().astimezone().replace(microsecond=0).isoformat()).classes("w-full")
-                duration = ui.number("Duration (minutes)", value=60, min=1, precision=0).classes("w-full")
-                attendees = ui.textarea("Attendees", placeholder="person@example.com; other@example.com").classes("w-full")
 
-                def save_meeting() -> None:
-                    try:
-                        payload = MeetingCreate(title=title.value, starts_at=starts_at.value, duration_minutes=int(duration.value), attendees=attendees.value)
+            def open_meeting_dialog(meeting_id: str) -> None:
+                with SessionLocal() as database:
+                    mtg = get_meeting(database, meeting_id)
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl p-6 gap-3"):
+                    ui.label(f"Edit meeting: {mtg.title}").classes("text-lg font-semibold")
+                    attendees_input = ui.textarea("Attendees", value=mtg.attendees).classes("w-full")
+                    with ui.row().classes("w-full gap-4"):
+                        duration_input = ui.number("Duration (minutes)", value=mtg.duration_minutes or 0, min=1, precision=0).classes("flex-1")
+                        location_input = ui.input("Location", value=mtg.location).classes("flex-1")
+
+                    ui.separator()
+                    agenda_section = ui.column().classes("w-full gap-2")
+
+                    def render_agenda_section() -> None:
+                        agenda_section.clear()
                         with SessionLocal() as database:
-                            create_meeting(database, payload)
-                        table.rows = _meeting_rows()
-                        table.update()
-                        ui.notify("Meeting created")
-                    except (TypeError, ValueError) as error:
-                        ui.notify(f"Unable to create meeting: {error}", type="negative")
+                            current = get_meeting(database, meeting_id)
+                            all_topics = list_topics(database)
+                        with agenda_section:
+                            ui.label(f"Agenda topics ({len(current.topics)})").classes("font-medium")
+                            if not current.topics:
+                                ui.label("No topics yet. Add one below.").classes("text-sm text-gray-600")
+                            for topic in current.topics:
+                                with ui.row().classes("w-full items-center justify-between"):
+                                    ui.label(f"{topic.title} · {topic.lead or 'No lead'}").classes("text-sm")
+                                    ui.label(f"{topic.duration_minutes or '-'} min · {topic.status.title()}").classes("text-sm text-gray-600")
 
-                ui.button("Create meeting", on_click=save_meeting, icon="add").classes("self-start")
+                            attached_ids = {topic.id for topic in current.topics}
+                            available_topics = {
+                                topic.id: f"{topic.title} — {topic.meeting.title}"
+                                for topic in all_topics
+                                if topic.id not in attached_ids
+                            }
+
+                            with ui.row().classes("w-full gap-2 items-end mt-2 flex-wrap"):
+                                topic_choice = ui.select(available_topics, label="Existing topic").classes("flex-1 min-w-56")
+
+                                def add_existing_topic() -> None:
+                                    try:
+                                        if not topic_choice.value:
+                                            raise ValueError("Select a topic to add")
+                                        with SessionLocal() as database:
+                                            add_topic_to_meeting(database, meeting_id, topic_choice.value)
+                                        render_agenda_section()
+                                        table.rows = rows_with_add()
+                                        table.update()
+                                        ui.notify("Topic added to agenda")
+                                    except (LookupError, ValueError) as error:
+                                        ui.notify(f"Unable to add topic: {error}", type="negative")
+
+                                ui.button("Add to agenda", on_click=add_existing_topic, icon="playlist_add")
+                            if not available_topics:
+                                ui.label("No other topics available. Create new topics from the Topics page.").classes("text-sm text-gray-600")
+
+                            def send_invite() -> None:
+                                try:
+                                    with SessionLocal() as database:
+                                        send_meeting_invite(database, meeting_id)
+                                    ui.notify("Invitation sent", type="positive")
+                                    dialog.close()
+                                except (LookupError, ValueError) as error:
+                                    ui.notify(str(error), type="warning")
+                                except EmailDeliveryError as error:
+                                    ui.notify(str(error), type="negative")
+
+                            with ui.row().classes("w-full items-center justify-between mt-2"):
+                                invite_button = ui.button("Send invite", on_click=send_invite, icon="mail")
+                                invite_button.set_enabled(bool(current.topics))
+                                if not current.topics:
+                                    invite_button.tooltip("Add at least one agenda topic before sending an invite.")
+                                if current.invitation_generated:
+                                    ui.label("Invitation already sent").classes("text-sm text-positive")
+
+                    render_agenda_section()
+
+                    def save_meeting_details() -> None:
+                        try:
+                            payload = MeetingUpdate(
+                                attendees=attendees_input.value,
+                                duration_minutes=int(duration_input.value) if duration_input.value else None,
+                                location=location_input.value,
+                            )
+                            with SessionLocal() as database:
+                                update_meeting(database, meeting_id, payload)
+                            table.rows = rows_with_add()
+                            table.update()
+                            ui.notify("Meeting updated")
+                            dialog.close()
+                        except (LookupError, ValueError) as error:
+                            ui.notify(f"Unable to update meeting: {error}", type="negative")
+
+                    with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                        ui.button("Cancel", on_click=dialog.close).props("flat")
+                        ui.button("Save changes", on_click=save_meeting_details, icon="save")
+                dialog.open()
+
+            def open_create_meeting_dialog() -> None:
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl p-6 gap-3"):
+                    ui.label("Schedule meeting").classes("text-lg font-semibold")
+                    title = ui.input("Meeting title").classes("w-full")
+                    starts_at = ui.input("Start (ISO 8601)", value=datetime.now().astimezone().replace(microsecond=0).isoformat()).classes("w-full")
+                    duration = ui.number("Duration (minutes)", value=60, min=1, precision=0).classes("w-full")
+                    attendees = ui.textarea("Attendees", placeholder="person@example.com; other@example.com").classes("w-full")
+
+                    def save_meeting() -> None:
+                        try:
+                            payload = MeetingCreate(title=title.value, starts_at=starts_at.value, duration_minutes=int(duration.value), attendees=attendees.value)
+                            with SessionLocal() as database:
+                                create_meeting(database, payload)
+                            table.rows = rows_with_add()
+                            table.update()
+                            ui.notify("Meeting created")
+                            dialog.close()
+                        except (TypeError, ValueError) as error:
+                            ui.notify(f"Unable to create meeting: {error}", type="negative")
+
+                    with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                        ui.button("Cancel", on_click=dialog.close).props("flat")
+                        ui.button("Create meeting", on_click=save_meeting, icon="add")
+                dialog.open()
+
+            def rows_with_add() -> list[dict[str, str | int]]:
+                return [*_meeting_rows(), {"id": "__add__"}]
+
+            table = ui.table(columns=_meeting_columns(include_attendees=True), rows=rows_with_add(), row_key="id").classes("cochair-table w-full")
+            table.add_slot(
+                "body",
+                '''
+                <q-tr v-if="props.row.id === '__add__'" class="cursor-pointer text-primary" @click="() => $parent.$emit('add_meeting')">
+                    <q-td colspan="100%">
+                        <q-icon name="add" size="xs" class="q-mr-sm" />Schedule meeting
+                    </q-td>
+                </q-tr>
+                <q-tr v-else :props="props">
+                    <q-td v-for="col in props.cols" :key="col.name" :props="props">
+                        <q-btn v-if="col.name === 'actions'" round flat dense icon="edit" color="primary" @click="() => $parent.$emit('edit_meeting', props.row)" />
+                        <template v-else>{{ col.value }}</template>
+                    </q-td>
+                </q-tr>
+                ''',
+            )
+            table.on("edit_meeting", lambda event: open_meeting_dialog(event.args["id"]))
+            table.on("add_meeting", lambda _: open_create_meeting_dialog())
 
     @ui.page("/topics")
     def topics_page() -> None:
@@ -226,62 +402,128 @@ def register_home_page() -> None:
                 {"name": "lead", "label": "Lead", "field": "lead", "align": "left"},
                 {"name": "duration", "label": "Duration", "field": "duration"},
                 {"name": "status", "label": "Status", "field": "status"},
-                {"name": "actions", "label": "Actions", "field": "actions"},
+                {"name": "actions_count", "label": "Actions", "field": "actions_count"},
+                {"name": "actions", "label": "", "field": "actions"},
             ]
-            table = ui.table(columns=columns, rows=[]).classes("cochair-table w-full")
 
             def topic_rows() -> list[dict[str, str | int]]:
                 with SessionLocal() as database:
                     return [
                         {
+                            "id": topic.id,
                             "meeting": topic.meeting.title,
                             "title": topic.title,
                             "lead": topic.lead or "-",
                             "duration": topic.duration_minutes or "-",
                             "status": topic.status.title(),
-                            "actions": len(topic.actions),
+                            "actions_count": len(topic.actions),
                         }
                         for topic in list_topics(database)
                     ]
 
-            table.rows = topic_rows()
-            table.update()
+            def open_topic_dialog(topic_id: str) -> None:
+                with SessionLocal() as database:
+                    selected_topic = next((topic for topic in list_topics(database) if topic.id == topic_id), None)
+                if selected_topic is None:
+                    ui.notify("Topic not found", type="negative")
+                    return
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl p-6 gap-3"):
+                    ui.label(f"Edit topic: {selected_topic.title}").classes("text-lg font-semibold")
+                    edit_title = ui.input("Topic title", value=selected_topic.title).classes("w-full")
+                    edit_description = ui.textarea("Description", value=selected_topic.description).classes("w-full")
+                    with ui.row().classes("w-full gap-4"):
+                        edit_scheduled_time = ui.input("Scheduled time", value=selected_topic.scheduled_time or "").classes("flex-1")
+                        edit_duration = ui.number("Duration (minutes)", value=selected_topic.duration_minutes or 0, min=0, precision=0).classes("flex-1")
+                    edit_lead = ui.input("Topic lead", value=selected_topic.lead or "").classes("w-full")
+                    edit_status = ui.select(["open", "in_progress", "closed"], value=selected_topic.status, label="Status").classes("w-full")
+
+                    def save_edit() -> None:
+                        try:
+                            payload = TopicUpdate(
+                                title=edit_title.value,
+                                description=edit_description.value,
+                                scheduled_time=edit_scheduled_time.value or None,
+                                duration_minutes=int(edit_duration.value) if edit_duration.value is not None else None,
+                                lead=edit_lead.value or None,
+                                status=edit_status.value,
+                            )
+                            with SessionLocal() as database:
+                                update_topic(database, topic_id, payload)
+                            table.rows = rows_with_add()
+                            table.update()
+                            ui.notify("Topic updated")
+                            dialog.close()
+                        except (LookupError, ValueError) as error:
+                            ui.notify(f"Unable to update topic: {error}", type="negative")
+
+                    with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                        ui.button("Cancel", on_click=dialog.close).props("flat")
+                        ui.button("Save changes", on_click=save_edit, icon="save")
+                dialog.open()
+
             with SessionLocal() as database:
                 meeting_choices = {meeting.id: meeting.title for meeting in list_meetings(database)}
-            with ui.card().classes("cochair-surface w-full max-w-2xl p-6"):
-                with ui.row().classes("items-center gap-2"):
-                    ui.icon("add_circle", size="sm").classes("text-primary")
+
+            def open_create_topic_dialog() -> None:
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl p-6 gap-3"):
                     ui.label("Add agenda topic").classes("text-lg font-semibold")
-                meeting_id = ui.select(meeting_choices, label="Meeting").classes("w-full")
-                title = ui.input("Topic title").classes("w-full")
-                description = ui.textarea("Description").classes("w-full")
-                with ui.row().classes("w-full gap-4"):
-                    scheduled_time = ui.input("Scheduled time").classes("flex-1")
-                    duration = ui.number("Duration (minutes)", min=1, precision=0).classes("flex-1")
-                lead = ui.input("Topic lead").classes("w-full")
-                board_attendees = ui.textarea("Board attendees").classes("w-full")
+                    meeting_id = ui.select(meeting_choices, label="Meeting").classes("w-full")
+                    title = ui.input("Topic title").classes("w-full")
+                    description = ui.textarea("Description").classes("w-full")
+                    with ui.row().classes("w-full gap-4"):
+                        scheduled_time = ui.input("Scheduled time").classes("flex-1")
+                        duration = ui.number("Duration (minutes)", min=1, precision=0).classes("flex-1")
+                    lead = ui.input("Topic lead").classes("w-full")
+                    board_attendees = ui.textarea("Board attendees").classes("w-full")
 
-                def save_topic() -> None:
-                    try:
-                        if not meeting_id.value:
-                            raise ValueError("Select a meeting")
-                        payload = TopicDraft(
-                            title=title.value,
-                            description=description.value,
-                            scheduled_time=scheduled_time.value or None,
-                            duration_minutes=int(duration.value) if duration.value else None,
-                            lead=lead.value or None,
-                            board_attendees=board_attendees.value,
-                        )
-                        with SessionLocal() as database:
-                            create_topic(database, meeting_id.value, payload)
-                        table.rows = topic_rows()
-                        table.update()
-                        ui.notify("Agenda topic added")
-                    except (TypeError, ValueError) as error:
-                        ui.notify(f"Unable to add topic: {error}", type="negative")
+                    def save_topic() -> None:
+                        try:
+                            if not meeting_id.value:
+                                raise ValueError("Select a meeting")
+                            payload = TopicDraft(
+                                title=title.value,
+                                description=description.value,
+                                scheduled_time=scheduled_time.value or None,
+                                duration_minutes=int(duration.value) if duration.value else None,
+                                lead=lead.value or None,
+                                board_attendees=board_attendees.value,
+                            )
+                            with SessionLocal() as database:
+                                create_topic(database, meeting_id.value, payload)
+                            table.rows = rows_with_add()
+                            table.update()
+                            ui.notify("Agenda topic added")
+                            dialog.close()
+                        except (TypeError, ValueError) as error:
+                            ui.notify(f"Unable to add topic: {error}", type="negative")
 
-                ui.button("Add topic", on_click=save_topic, icon="add").classes("self-start")
+                    with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                        ui.button("Cancel", on_click=dialog.close).props("flat")
+                        ui.button("Add topic", on_click=save_topic, icon="add")
+                dialog.open()
+
+            def rows_with_add() -> list[dict[str, str | int]]:
+                return [*topic_rows(), {"id": "__add__"}]
+
+            table = ui.table(columns=columns, rows=rows_with_add(), row_key="id").classes("cochair-table w-full")
+            table.add_slot(
+                "body",
+                '''
+                <q-tr v-if="props.row.id === '__add__'" class="cursor-pointer text-primary" @click="() => $parent.$emit('add_topic')">
+                    <q-td colspan="100%">
+                        <q-icon name="add" size="xs" class="q-mr-sm" />Add agenda topic
+                    </q-td>
+                </q-tr>
+                <q-tr v-else :props="props">
+                    <q-td v-for="col in props.cols" :key="col.name" :props="props">
+                        <q-btn v-if="col.name === 'actions'" round flat dense icon="edit" color="primary" @click="() => $parent.$emit('edit_topic', props.row)" />
+                        <template v-else>{{ col.value }}</template>
+                    </q-td>
+                </q-tr>
+                ''',
+            )
+            table.on("edit_topic", lambda event: open_topic_dialog(event.args["id"]))
+            table.on("add_topic", lambda _: open_create_topic_dialog())
 
     @ui.page("/minutes")
     def minutes_page() -> None:

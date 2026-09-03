@@ -4,14 +4,14 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.config import get_settings
-from app.models.dataverse import load_dataverse_metadata
+from app.models.dataverse import METADATA
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_url)
-target_metadata = load_dataverse_metadata(settings.solution_export_directory)
+target_metadata = METADATA
 
 
 def run_migrations_offline() -> None:
