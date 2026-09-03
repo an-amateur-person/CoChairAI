@@ -43,6 +43,10 @@ class AgendaTopicLink(BaseModel):
     topic_id: str = Field(min_length=1)
 
 
+class AgendaReorder(BaseModel):
+    topic_ids: list[str] = Field(min_length=1)
+
+
 class MeetingUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     starts_at: datetime | None = None

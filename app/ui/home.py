@@ -1,22 +1,30 @@
+import json
 from datetime import datetime
 
-from nicegui import app, ui
+from nicegui import app, run, ui
 
 from app.api.schemas import MeetingCreate, MeetingUpdate, TopicDraft, TopicUpdate
 from app.config import get_settings
 from app.db import SessionLocal
 from app.services.email import EmailDeliveryError
+from app.services.foundry import FoundryAgentError, invoke_agent, invoke_json_agent
 from app.services.meetings import (
     add_topic_to_meeting,
+    approve_meeting_minutes,
     create_meeting,
     create_topic,
     get_meeting,
+    get_minutes_draft,
     list_meetings,
     list_topics,
+    remove_topic_from_meeting,
+    reorder_meeting_agenda,
     send_meeting_invite,
+    save_minutes_draft,
     update_meeting,
     update_topic,
 )
+from app.services.presentation import build_presentation
 
 
 def _apply_theme() -> ui.dark_mode:
@@ -251,11 +259,17 @@ def register_home_page() -> None:
                 with SessionLocal() as database:
                     mtg = get_meeting(database, meeting_id)
                 with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl p-6 gap-3"):
-                    ui.label(f"Edit meeting: {mtg.title}").classes("text-lg font-semibold")
+                    edit_mode = {"enabled": False}
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label(f"Meeting: {mtg.title}").classes("text-lg font-semibold")
+                        edit_agenda_button = ui.button("Edit agenda", icon="edit")
                     attendees_input = ui.textarea("Attendees", value=mtg.attendees).classes("w-full")
                     with ui.row().classes("w-full gap-4"):
                         duration_input = ui.number("Duration (minutes)", value=mtg.duration_minutes or 0, min=1, precision=0).classes("flex-1")
                         location_input = ui.input("Location", value=mtg.location).classes("flex-1")
+                    attendees_input.set_enabled(False)
+                    duration_input.set_enabled(False)
+                    location_input.set_enabled(False)
 
                     ui.separator()
                     agenda_section = ui.column().classes("w-full gap-2")
@@ -268,11 +282,59 @@ def register_home_page() -> None:
                         with agenda_section:
                             ui.label(f"Agenda topics ({len(current.topics)})").classes("font-medium")
                             if not current.topics:
-                                ui.label("No topics yet. Add one below.").classes("text-sm text-gray-600")
-                            for topic in current.topics:
-                                with ui.row().classes("w-full items-center justify-between"):
-                                    ui.label(f"{topic.title} · {topic.lead or 'No lead'}").classes("text-sm")
-                                    ui.label(f"{topic.duration_minutes or '-'} min · {topic.status.title()}").classes("text-sm text-gray-600")
+                                ui.label("No topics yet. Attach an existing topic below.").classes("text-sm text-gray-600")
+                            for index, topic in enumerate(current.topics):
+                                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                    ui.label(f"{index + 1}. {topic.title} · {topic.lead or 'No lead'}").classes("text-sm flex-1 min-w-48")
+                                    topic_duration = ui.number("Minutes", value=topic.duration_minutes or 0, min=0, precision=0).classes("w-28")
+                                    ui.label(topic.status.title()).classes("text-sm text-gray-600 w-24")
+                                    topic_duration.set_enabled(edit_mode["enabled"])
+
+                                    def save_topic_duration(topic_id: str = topic.id, duration_input=topic_duration) -> None:
+                                        try:
+                                            with SessionLocal() as database:
+                                                update_topic(database, topic_id, TopicUpdate(duration_minutes=int(duration_input.value)))
+                                            render_agenda_section()
+                                            ui.notify("Agenda duration updated")
+                                        except (LookupError, ValueError) as error:
+                                            ui.notify(str(error), type="negative")
+
+                                    def move_topic(direction: int, topic_index: int = index) -> None:
+                                        new_index = topic_index + direction
+                                        if new_index < 0 or new_index >= len(current.topics):
+                                            return
+                                        ordered_ids = [item.id for item in current.topics]
+                                        ordered_ids[topic_index], ordered_ids[new_index] = ordered_ids[new_index], ordered_ids[topic_index]
+                                        try:
+                                            with SessionLocal() as database:
+                                                reorder_meeting_agenda(database, meeting_id, ordered_ids)
+                                            render_agenda_section()
+                                        except (LookupError, ValueError) as error:
+                                            ui.notify(str(error), type="negative")
+
+                                    def remove_topic(topic_id: str = topic.id) -> None:
+                                        try:
+                                            with SessionLocal() as database:
+                                                remove_topic_from_meeting(database, meeting_id, topic_id)
+                                            render_agenda_section()
+                                            table.rows = rows_with_add()
+                                            table.update()
+                                            ui.notify("Topic removed from agenda")
+                                        except LookupError as error:
+                                            ui.notify(str(error), type="negative")
+
+                                    save_duration_button = ui.button(icon="save", on_click=save_topic_duration).props("flat round dense")
+                                    save_duration_button.tooltip("Save duration")
+                                    save_duration_button.set_enabled(edit_mode["enabled"])
+                                    up_button = ui.button(icon="arrow_upward", on_click=lambda _: move_topic(-1)).props("flat round dense")
+                                    up_button.tooltip("Move topic up")
+                                    down_button = ui.button(icon="arrow_downward", on_click=lambda _: move_topic(1)).props("flat round dense")
+                                    down_button.tooltip("Move topic down")
+                                    remove_button = ui.button(icon="delete_outline", on_click=remove_topic).props("flat round dense color=negative")
+                                    remove_button.tooltip("Remove from agenda")
+                                    up_button.set_enabled(edit_mode["enabled"] and index > 0)
+                                    down_button.set_enabled(edit_mode["enabled"] and index < len(current.topics) - 1)
+                                    remove_button.set_enabled(edit_mode["enabled"])
 
                             attached_ids = {topic.id for topic in current.topics}
                             available_topics = {
@@ -283,6 +345,7 @@ def register_home_page() -> None:
 
                             with ui.row().classes("w-full gap-2 items-end mt-2 flex-wrap"):
                                 topic_choice = ui.select(available_topics, label="Existing topic").classes("flex-1 min-w-56")
+                                topic_choice.set_enabled(edit_mode["enabled"])
 
                                 def add_existing_topic() -> None:
                                     try:
@@ -297,7 +360,8 @@ def register_home_page() -> None:
                                     except (LookupError, ValueError) as error:
                                         ui.notify(f"Unable to add topic: {error}", type="negative")
 
-                                ui.button("Add to agenda", on_click=add_existing_topic, icon="playlist_add")
+                                add_to_agenda_button = ui.button("Add to agenda", on_click=add_existing_topic, icon="playlist_add")
+                                add_to_agenda_button.set_enabled(edit_mode["enabled"])
                             if not available_topics:
                                 ui.label("No other topics available. Create new topics from the Topics page.").classes("text-sm text-gray-600")
 
@@ -322,6 +386,17 @@ def register_home_page() -> None:
 
                     render_agenda_section()
 
+                    def enable_agenda_editing() -> None:
+                        edit_mode["enabled"] = True
+                        edit_agenda_button.set_enabled(False)
+                        attendees_input.set_enabled(True)
+                        duration_input.set_enabled(True)
+                        location_input.set_enabled(True)
+                        save_meeting_button.set_enabled(True)
+                        render_agenda_section()
+
+                    edit_agenda_button.on("click", enable_agenda_editing)
+
                     def save_meeting_details() -> None:
                         try:
                             payload = MeetingUpdate(
@@ -340,7 +415,8 @@ def register_home_page() -> None:
 
                     with ui.row().classes("w-full justify-end gap-2 mt-4"):
                         ui.button("Cancel", on_click=dialog.close).props("flat")
-                        ui.button("Save changes", on_click=save_meeting_details, icon="save")
+                        save_meeting_button = ui.button("Save changes", on_click=save_meeting_details, icon="save")
+                        save_meeting_button.set_enabled(False)
                 dialog.open()
 
             def open_create_meeting_dialog() -> None:
@@ -529,30 +605,117 @@ def register_home_page() -> None:
     def minutes_page() -> None:
         _navigation("/minutes")
         with ui.column().classes("w-full max-w-7xl mx-auto p-6 gap-6"):
-            _page_heading("Meeting minutes", "Draft and approved minutes captured for meeting topics.", "description")
+            _page_heading("Meeting minutes", "Run the approved Foundry workflow from transcript to presentation.", "description")
             with SessionLocal() as database:
-                topics = list_topics(database)
-                rows = [
-                    {
-                        "meeting": topic.meeting.title,
-                        "topic": topic.title,
-                        "minutes": topic.minutes,
-                        "actions": len(topic.actions),
-                        "approval": topic.meeting.approval_status.title(),
-                    }
-                    for topic in topics
-                    if topic.minutes.strip()
-                ]
-            columns = [
-                {"name": "meeting", "label": "Meeting", "field": "meeting", "align": "left"},
-                {"name": "topic", "label": "Topic", "field": "topic", "align": "left"},
-                {"name": "minutes", "label": "Minutes", "field": "minutes", "align": "left"},
-                {"name": "actions", "label": "Actions", "field": "actions"},
-                {"name": "approval", "label": "Approval", "field": "approval"},
-            ]
-            if rows:
-                ui.table(columns=columns, rows=rows).classes("cochair-table w-full")
-            else:
-                with ui.card().classes("cochair-surface w-full p-6 items-center"):
-                    ui.icon("description", size="lg").classes("text-primary")
-                    ui.label("No meeting minutes have been captured yet.").classes("text-gray-600")
+                meeting_choices = {meeting.id: meeting.title for meeting in list_meetings(database)}
+            meeting_id = ui.select(meeting_choices, label="Meeting").classes("w-full max-w-xl")
+            transcript_files: dict[str, str] = {}
+            transcript_status = ui.label("Upload one or more transcript files to begin.").classes("text-sm text-gray-600")
+            workflow_status = ui.label("Ready when a meeting and transcript are selected.").classes("text-sm text-gray-600")
+            minutes_output = ui.textarea("Generated minutes", placeholder="Minutes Agent output will appear here.").props("outlined autogrow").classes("w-full")
+            data_output = ui.textarea("Extracted meeting data", placeholder="DataAgent JSON will appear here.").props("outlined autogrow").classes("w-full")
+            minutes_output.set_visibility(False)
+            data_output.set_visibility(False)
+
+            workflow_state: dict[str, object] = {"minutes": "", "data": {}}
+
+            def handle_upload(event) -> None:
+                try:
+                    transcript_files[event.name] = event.content.read().decode("utf-8", errors="replace")
+                    transcript_status.text = f"{len(transcript_files)} transcript file(s) ready."
+                    generate_minutes_button.set_enabled(bool(meeting_id.value))
+                except Exception as error:
+                    ui.notify(f"Unable to read transcript: {error}", type="negative")
+
+            ui.upload(
+                label="Meeting transcripts",
+                on_upload=handle_upload,
+                multiple=True,
+                auto_upload=True,
+            ).props("accept=.txt,.md,.vtt,.docx") .classes("w-full max-w-xl")
+
+            def selected_agenda() -> str:
+                if not meeting_id.value:
+                    return ""
+                with SessionLocal() as database:
+                    current = get_meeting(database, meeting_id.value)
+                return "\n".join(
+                    f"- {topic.title}; lead: {topic.lead or 'TBD'}; duration: {topic.duration_minutes or 'TBD'} minutes"
+                    for topic in current.topics
+                )
+
+            async def generate_minutes() -> None:
+                try:
+                    if not meeting_id.value:
+                        raise ValueError("Select a meeting first")
+                    if not transcript_files:
+                        raise ValueError("Upload at least one transcript file")
+                    generate_minutes_button.set_enabled(False)
+                    workflow_status.text = "Extracting minutes from the transcript..."
+                    transcript = "\n\n".join(
+                        f"File: {name}\n{content}" for name, content in transcript_files.items()
+                    )
+                    prompt = f"Meeting agenda:\n{selected_agenda() or 'No agenda topics supplied.'}\n\nMeeting transcript(s):\n{transcript}"
+                    minutes = await run.io_bound(invoke_agent, "minutes", prompt)
+                    with SessionLocal() as database:
+                        save_minutes_draft(database, meeting_id.value, minutes)
+                    workflow_state["minutes"] = minutes
+                    minutes_output.value = minutes
+                    minutes_output.set_visibility(True)
+                    await extract_data()
+                    approve_button.set_enabled(True)
+                    workflow_status.text = "Minutes draft saved. Review it before approving."
+                    ui.notify("Minutes Agent created a draft", type="positive")
+                except (FoundryAgentError, LookupError, ValueError) as error:
+                    workflow_status.text = f"Minutes extraction failed: {error}"
+                    ui.notify(str(error), type="negative")
+                except Exception as error:
+                    workflow_status.text = f"Minutes extraction failed: {error}"
+                    ui.notify("Minutes extraction failed; see the workflow status for details.", type="negative")
+                finally:
+                    generate_minutes_button.set_enabled(bool(meeting_id.value and transcript_files))
+
+            async def extract_data() -> None:
+                try:
+                    workflow_status.text = "Extracting structured meeting data..."
+                    data = await run.io_bound(invoke_json_agent, "data", str(workflow_state["minutes"]))
+                    workflow_state["data"] = data
+                    data_output.value = json.dumps(data, indent=2)
+                    data_output.set_visibility(True)
+                    workflow_status.text = "Meeting data extracted."
+                    ui.notify("DataAgent extracted meeting data", type="positive")
+                except FoundryAgentError as error:
+                    workflow_status.text = f"Meeting data extraction failed: {error}"
+                    ui.notify(str(error), type="negative")
+
+            def approve_minutes() -> None:
+                try:
+                    with SessionLocal() as database:
+                        approve_meeting_minutes(database, meeting_id.value)
+                    presentation_button.set_enabled(True)
+                    ui.notify("Minutes approved", type="positive")
+                except (LookupError, ValueError) as error:
+                    ui.notify(str(error), type="negative")
+
+            async def generate_presentation() -> None:
+                try:
+                    prompt = f"Approved meeting minutes:\n{workflow_state['minutes']}\n\nExtracted meeting data:\n{json.dumps(workflow_state['data'])}"
+                    presentation_data = await run.io_bound(invoke_json_agent, "presentation", prompt)
+                    filename = f"{meeting_choices[meeting_id.value].replace(' ', '_')}_presentation.pptx"
+                    ui.download(build_presentation(presentation_data, meeting_choices[meeting_id.value]), filename)
+                    ui.notify("Presentation generated", type="positive")
+                except FoundryAgentError as error:
+                    ui.notify(str(error), type="negative")
+
+            with ui.row().classes("w-full gap-3 flex-wrap"):
+                generate_minutes_button = ui.button("1. Extract minutes", on_click=generate_minutes, icon="summarize")
+                generate_minutes_button.set_enabled(False)
+                data_button = ui.button("2. Extract meeting data", on_click=extract_data, icon="data_object")
+                data_button.set_enabled(False)
+                data_button.tooltip("Runs automatically after MinutesAgent completes")
+                approve_button = ui.button("3. Approve minutes", on_click=approve_minutes, icon="task_alt")
+                approve_button.set_enabled(False)
+                presentation_button = ui.button("4. Generate presentation", on_click=generate_presentation, icon="slideshow")
+                presentation_button.set_enabled(False)
+
+            meeting_id.on("update:model-value", lambda _: generate_minutes_button.set_enabled(bool(transcript_files)))

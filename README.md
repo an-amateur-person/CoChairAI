@@ -66,7 +66,7 @@ Edit `.env` with your local configuration:
 ### Run the Application
 
 ```powershell
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --reload-dir app
 ```
 
 Open your browser to:

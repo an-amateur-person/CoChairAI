@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_use_tls: bool = True
     smtp_from_address: str | None = None
+    foundry_project_endpoint: str = "https://foundry-mbg.services.ai.azure.com/api/projects/proj-default"
+    foundry_data_agent_name: str = "DataAgent"
+    foundry_minutes_agent_name: str = "MinutesAgent"
+    foundry_presentation_agent_name: str = "PresentationAgent"
+    foundry_agent_version: str = "2"
 
 
 @lru_cache

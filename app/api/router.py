@@ -11,11 +11,13 @@ from app.services.meetings import (
     create_minutes_draft,
     create_topic,
     list_meetings,
+    remove_topic_from_meeting,
+    reorder_meeting_agenda,
     send_meeting_invite,
     update_meeting,
     update_topic,
 )
-from app.api.schemas import AgendaTopicLink, MeetingCreate, MeetingRead, MeetingUpdate, MinutesDraft, TopicDraft, TopicRead, TopicUpdate
+from app.api.schemas import AgendaReorder, AgendaTopicLink, MeetingCreate, MeetingRead, MeetingUpdate, MinutesDraft, TopicDraft, TopicRead, TopicUpdate
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -53,6 +55,24 @@ def post_topic(meeting_id: str, payload: TopicDraft, database: Session = Depends
 def post_agenda_topic(meeting_id: str, payload: AgendaTopicLink, database: Session = Depends(get_db)) -> MeetingRead:
     try:
         return add_topic_to_meeting(database, meeting_id, payload.topic_id)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+
+@router.delete("/meetings/{meeting_id}/agenda/{topic_id}", response_model=MeetingRead)
+def delete_agenda_topic(meeting_id: str, topic_id: str, database: Session = Depends(get_db)) -> MeetingRead:
+    try:
+        return remove_topic_from_meeting(database, meeting_id, topic_id)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+@router.put("/meetings/{meeting_id}/agenda/order", response_model=MeetingRead)
+def put_agenda_order(meeting_id: str, payload: AgendaReorder, database: Session = Depends(get_db)) -> MeetingRead:
+    try:
+        return reorder_meeting_agenda(database, meeting_id, payload.topic_ids)
     except LookupError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     except ValueError as error:

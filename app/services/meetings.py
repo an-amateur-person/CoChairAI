@@ -107,12 +107,19 @@ def _topics(database: Session, meeting_id: str, meeting_title: str, approval_sta
         topic_intake.c.status,
     ).select_from(
         join(meeting_agendas, topic_intake, meeting_agendas.c.topic_id == topic_intake.c.id)
-    ).where(meeting_agendas.c.meeting_id == meeting_id)
+    ).where(meeting_agendas.c.meeting_id == meeting_id).order_by(meeting_agendas.c.sequence, topic_intake.c.created_on)
     
     agenda_rows = database.execute(stmt).mappings().all()
     
     topic_records = []
     for row in agenda_rows:
+        minutes_link = database.execute(
+            select(topics_list.c.meeting_minutes_id, topics_list.c.minutes)
+            .where(topics_list.c.topic_id == row["id"])
+            .order_by(topics_list.c.created_on.desc())
+        ).first()
+        topic_minutes = minutes_link.minutes if minutes_link else ""
+        topic_actions = _topic_actions(database, minutes_link.meeting_minutes_id) if minutes_link else []
         topic_records.append(
             TopicRecord(
                 id=row.get("id", str(uuid4())),
@@ -124,6 +131,8 @@ def _topics(database: Session, meeting_id: str, meeting_title: str, approval_sta
                 cross_board_attendees=row.get("cross_board_attendees", ""),
                 lead=row.get("lead"),
                 status=row.get("status", "open"),
+                minutes=topic_minutes,
+                actions=topic_actions,
                 meeting=MeetingSummary(meeting_title, approval_status)
             )
         )
@@ -220,6 +229,11 @@ def create_topic(database: Session, meeting_id: str, payload: TopicDraft) -> Top
             id=str(uuid4()),
             meeting_id=meeting_id,
             topic_id=topic_id,
+            sequence=(database.scalar(
+                select(meeting_agendas.c.sequence)
+                .where(meeting_agendas.c.meeting_id == meeting_id)
+                .order_by(meeting_agendas.c.sequence.desc())
+            ) or 0) + 1,
             created_on=now
         )
     )
@@ -258,6 +272,19 @@ def add_topic_to_meeting(database: Session, meeting_id: str, topic_id: str) -> M
     )
     database.commit()
     return get_meeting(database, meeting_id)
+
+
+def _normalize_agenda_sequences(database: Session, meeting_id: str) -> None:
+    """Keep agenda sequence values contiguous after an item is removed."""
+    links = database.execute(
+        select(meeting_agendas.c.id)
+        .where(meeting_agendas.c.meeting_id == meeting_id)
+        .order_by(meeting_agendas.c.sequence, meeting_agendas.c.created_on)
+    ).scalars().all()
+    for sequence, agenda_id in enumerate(links, 1):
+        database.execute(
+            update(meeting_agendas).where(meeting_agendas.c.id == agenda_id).values(sequence=sequence)
+        )
 
 
 def create_meeting(database: Session, payload: MeetingCreate) -> MeetingRecord:
@@ -304,7 +331,8 @@ def create_minutes_draft(database: Session, payload: MinutesDraft) -> MeetingRec
     )
     
     for topic in payload.topics or []:
-        topic_id = str(uuid4())
+        topic_record = next((item for item in meeting_obj.topics if item.title == topic.title), None)
+        topic_id = topic_record.id if topic_record else str(uuid4())
         database.execute(
             topics_list.insert().values(
                 id=str(uuid4()),
@@ -331,6 +359,50 @@ def create_minutes_draft(database: Session, payload: MinutesDraft) -> MeetingRec
     
     database.commit()
     return get_meeting(database, meeting_obj.id)
+
+
+def save_minutes_draft(database: Session, meeting_id: str, minutes_text: str) -> MeetingRecord:
+    """Create or replace the draft minutes for an existing meeting."""
+    if database.execute(select(meeting).where(meeting.c.id == meeting_id)).first() is None:
+        raise LookupError(f"Meeting {meeting_id} was not found.")
+
+    now = datetime.now(timezone.utc)
+    existing = database.execute(
+        select(meeting_minutes.c.id).where(meeting_minutes.c.meeting_id == meeting_id)
+    ).scalar_one_or_none()
+    if existing:
+        database.execute(
+            update(meeting_minutes).where(meeting_minutes.c.id == existing).values(
+                summary=minutes_text,
+                approval_status=ApprovalStatus.DRAFT,
+                approved_by=None,
+                approved_on=None,
+                modified_on=now,
+            )
+        )
+    else:
+        database.execute(
+            meeting_minutes.insert().values(
+                id=str(uuid4()),
+                meeting_id=meeting_id,
+                summary=minutes_text,
+                approval_status=ApprovalStatus.DRAFT,
+                created_on=now,
+                modified_on=now,
+            )
+        )
+    database.commit()
+    return get_meeting(database, meeting_id)
+
+
+def get_minutes_draft(database: Session, meeting_id: str) -> str:
+    """Return the latest saved minutes text for a meeting."""
+    row = database.execute(
+        select(meeting_minutes.c.summary)
+        .where(meeting_minutes.c.meeting_id == meeting_id)
+        .order_by(meeting_minutes.c.created_on.desc())
+    ).first()
+    return row[0] if row and row[0] else ""
 
 
 def get_meeting(database: Session, meeting_id: str) -> MeetingRecord:
@@ -439,11 +511,14 @@ def send_meeting_invite(database: Session, meeting_id: str) -> MeetingRecord:
 def approve_meeting_minutes(database: Session, meeting_id: str) -> MeetingRecord:
     """Approve meeting minutes."""
     mtg = get_meeting(database, meeting_id)
+    now = datetime.now(timezone.utc)
     
     # Update meeting_minutes approval status
     database.execute(
         update(meeting_minutes).where(meeting_minutes.c.meeting_id == meeting_id).values(
-            approval_status=ApprovalStatus.APPROVED
+            approval_status=ApprovalStatus.APPROVED,
+            approved_on=now,
+            modified_on=now,
         )
     )
     
@@ -454,15 +529,45 @@ def approve_meeting_minutes(database: Session, meeting_id: str) -> MeetingRecord
     
     for mm_id in mm_ids:
         database.execute(
-            update(topics_list).where(topics_list.c.meeting_minutes_id == mm_id).values(
-                approval_status=ApprovalStatus.APPROVED
-            )
-        )
-        database.execute(
             update(actions_list).where(actions_list.c.meeting_minutes_id == mm_id).values(
-                status="approved"
+                status="approved",
+                modified_on=now,
             )
         )
     
+    database.commit()
+    return get_meeting(database, meeting_id)
+
+
+def remove_topic_from_meeting(database: Session, meeting_id: str, topic_id: str) -> MeetingRecord:
+    """Remove a topic from an agenda without deleting the reusable topic."""
+    link = database.execute(
+        select(meeting_agendas.c.id).where(
+            meeting_agendas.c.meeting_id == meeting_id,
+            meeting_agendas.c.topic_id == topic_id,
+        )
+    ).scalar_one_or_none()
+    if link is None:
+        raise LookupError(f"Topic {topic_id} is not on meeting {meeting_id}'s agenda.")
+    database.execute(meeting_agendas.delete().where(meeting_agendas.c.id == link))
+    _normalize_agenda_sequences(database, meeting_id)
+    database.commit()
+    return get_meeting(database, meeting_id)
+
+
+def reorder_meeting_agenda(database: Session, meeting_id: str, topic_ids: list[str]) -> MeetingRecord:
+    """Persist the displayed topic order for a meeting agenda."""
+    agenda_ids = set(database.execute(
+        select(meeting_agendas.c.topic_id).where(meeting_agendas.c.meeting_id == meeting_id)
+    ).scalars().all())
+    if set(topic_ids) != agenda_ids or len(topic_ids) != len(agenda_ids):
+        raise ValueError("The reordered topic list must contain each agenda topic exactly once.")
+    for sequence, topic_id in enumerate(topic_ids, 1):
+        database.execute(
+            update(meeting_agendas).where(
+                meeting_agendas.c.meeting_id == meeting_id,
+                meeting_agendas.c.topic_id == topic_id,
+            ).values(sequence=sequence)
+        )
     database.commit()
     return get_meeting(database, meeting_id)
