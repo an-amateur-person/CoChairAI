@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import MeetingCreate, MeetingUpdate, MinutesDraft, TopicDraft, TopicUpdate
 from app.models.dataverse import meeting, topic_intake, meeting_agendas, meeting_minutes, topics_list, actions_list
-from app.models.meeting import ApprovalStatus
+from app.models.meeting import ApprovalEntity, ApprovalStatus
+from app.services.approvals import record_decision, statuses_for
 from app.services.email import send_email
 
 
@@ -42,6 +43,7 @@ class TopicRecord:
     minutes: str = ""
     actions: list[ActionRecord] = field(default_factory=list)
     meeting: MeetingSummary = field(default_factory=lambda: MeetingSummary(""))
+    approval_status: ApprovalStatus = ApprovalStatus.DRAFT
 
 
 @dataclass
@@ -69,7 +71,10 @@ def _integer(value: object, default: int = 0) -> int:
 
 def _get_approval_status(status_str: str) -> ApprovalStatus:
     """Convert status string to ApprovalStatus enum."""
-    return ApprovalStatus.APPROVED if status_str == ApprovalStatus.APPROVED else ApprovalStatus.DRAFT
+    try:
+        return ApprovalStatus(status_str)
+    except ValueError:
+        return ApprovalStatus.DRAFT
 
 
 def _topic_actions(database: Session, meeting_minutes_id: str) -> list[ActionRecord]:
@@ -162,7 +167,11 @@ def _topics(database: Session, meeting_id: str, meeting_title: str, approval_sta
                 meeting=MeetingSummary(meeting_title, approval_status)
             )
         )
-    
+
+    topic_statuses = statuses_for(database, ApprovalEntity.TOPIC, [item.id for item in topic_records])
+    for record in topic_records:
+        record.approval_status = topic_statuses.get(record.id, ApprovalStatus.DRAFT)
+
     return topic_records
 
 
@@ -348,6 +357,7 @@ def create_minutes_draft(database: Session, payload: MinutesDraft) -> MeetingRec
                 actions_list.insert().values(
                     id=str(uuid4()),
                     meeting_minutes_id=mm_id,
+                    topic_id=topic_id,
                     title=action.title,
                     description=action.description if hasattr(action, 'description') else "",
                     owner=action.owner if hasattr(action, 'owner') else None,
@@ -508,33 +518,20 @@ def send_meeting_invite(database: Session, meeting_id: str) -> MeetingRecord:
     return get_meeting(database, meeting_id)
 
 
-def approve_meeting_minutes(database: Session, meeting_id: str) -> MeetingRecord:
-    """Approve meeting minutes."""
-    mtg = get_meeting(database, meeting_id)
+def approve_meeting_minutes(database: Session, meeting_id: str, approver_upn: str) -> MeetingRecord:
+    """Approve meeting minutes once every topic beneath the meeting is approved."""
+    get_meeting(database, meeting_id)
+    record_decision(database, ApprovalEntity.MEETING, meeting_id, ApprovalStatus.APPROVED, approver_upn)
+
     now = datetime.now(timezone.utc)
-    
-    # Update meeting_minutes approval status
     database.execute(
         update(meeting_minutes).where(meeting_minutes.c.meeting_id == meeting_id).values(
             approval_status=ApprovalStatus.APPROVED,
+            approved_by=approver_upn,
             approved_on=now,
             modified_on=now,
         )
     )
-    
-    # Update related topics and actions
-    mm_ids = database.execute(
-        select(meeting_minutes.c.id).where(meeting_minutes.c.meeting_id == meeting_id)
-    ).scalars().all()
-    
-    for mm_id in mm_ids:
-        database.execute(
-            update(actions_list).where(actions_list.c.meeting_minutes_id == mm_id).values(
-                status="approved",
-                modified_on=now,
-            )
-        )
-    
     database.commit()
     return get_meeting(database, meeting_id)
 

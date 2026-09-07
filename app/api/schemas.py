@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.meeting import ApprovalStatus
+from app.models.meeting import ApprovalEntity, ApprovalStatus, AttendeeType
 
 
 class ActionDraft(BaseModel):
@@ -77,6 +77,32 @@ class TopicRead(TopicDraft):
     model_config = ConfigDict(from_attributes=True)
     id: str
     actions: list[ActionRead]
+    approval_status: ApprovalStatus = ApprovalStatus.DRAFT
+
+
+class AttendeeEntry(BaseModel):
+    upn: str = Field(min_length=3, max_length=320)
+    attendee_type: AttendeeType = AttendeeType.BOARD
+    display_name: str | None = None
+    object_id: str | None = None
+
+
+class TopicAttendees(BaseModel):
+    attendees: list[AttendeeEntry] = Field(default_factory=list)
+
+
+class ApprovalDecision(BaseModel):
+    status: ApprovalStatus
+    comments: str | None = Field(default=None, max_length=2000)
+
+
+class ApprovalRead(BaseModel):
+    entity_type: ApprovalEntity
+    entity_id: str
+    status: ApprovalStatus
+    approver_upn: str | None = None
+    comments: str | None = None
+    created_on: datetime
 
 
 class MeetingRead(MeetingCreate):

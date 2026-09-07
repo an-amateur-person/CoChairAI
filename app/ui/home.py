@@ -458,13 +458,17 @@ def register_home_page() -> None:
                 </q-tr>
                 <q-tr v-else :props="props">
                     <q-td v-for="col in props.cols" :key="col.name" :props="props">
-                        <q-btn v-if="col.name === 'actions'" round flat dense icon="edit" color="primary" @click="() => $parent.$emit('edit_meeting', props.row)" />
+                        <template v-if="col.name === 'actions'">
+                            <q-btn round flat dense icon="account_tree" color="primary" @click="() => $parent.$emit('open_meeting', props.row)" />
+                            <q-btn round flat dense icon="edit" color="primary" @click="() => $parent.$emit('edit_meeting', props.row)" />
+                        </template>
                         <template v-else>{{ col.value }}</template>
                     </q-td>
                 </q-tr>
                 ''',
             )
             table.on("edit_meeting", lambda event: open_meeting_dialog(event.args["id"]))
+            table.on("open_meeting", lambda event: ui.navigate.to(f"/meetings/{event.args['id']}"))
             table.on("add_meeting", lambda _: open_create_meeting_dialog())
 
     @ui.page("/topics")

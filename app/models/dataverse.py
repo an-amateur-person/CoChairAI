@@ -1,6 +1,17 @@
 """Database schema definitions for CoChairAI application."""
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, MetaData, String, Table, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.engine import Engine
 
 METADATA = MetaData()
@@ -84,6 +95,7 @@ actions_list = Table(
     METADATA,
     Column("id", String(36), primary_key=True),
     Column("meeting_minutes_id", String(36), nullable=False),
+    Column("topic_id", String(36), nullable=True),
     Column("title", String(500), nullable=False),
     Column("description", Text, nullable=True),
     Column("owner", String(500), nullable=True),
@@ -91,6 +103,38 @@ actions_list = Table(
     Column("due_date", DateTime(timezone=True), nullable=True),
     Column("created_on", DateTime(timezone=True), nullable=False),
     Column("modified_on", DateTime(timezone=True), nullable=False),
+)
+
+# Resolved attendee identities per topic. Drives both UI visibility and the
+# per-topic SharePoint folder permissions, so entries must be real directory
+# principals rather than free text.
+topic_attendee = Table(
+    "topic_attendee",
+    METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("topic_id", String(36), nullable=False),
+    Column("upn", String(320), nullable=False),
+    Column("display_name", String(500), nullable=True),
+    Column("object_id", String(36), nullable=True),
+    Column("attendee_type", String(30), nullable=False),
+    Column("created_on", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("topic_id", "upn", "attendee_type", name="uq_topic_attendee"),
+    Index("ix_topic_attendee_topic", "topic_id"),
+)
+
+# Append-only approval history covering every level of the hierarchy.
+# Current state is the most recent row for an entity; earlier rows are the audit trail.
+approval = Table(
+    "approval",
+    METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("entity_type", String(20), nullable=False),
+    Column("entity_id", String(36), nullable=False),
+    Column("status", String(30), nullable=False),
+    Column("approver_upn", String(320), nullable=True),
+    Column("comments", Text, nullable=True),
+    Column("created_on", DateTime(timezone=True), nullable=False),
+    Index("ix_approval_entity", "entity_type", "entity_id", "created_on"),
 )
 
 

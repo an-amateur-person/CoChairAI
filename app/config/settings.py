@@ -24,6 +24,32 @@ class Settings(BaseSettings):
     foundry_presentation_agent_name: str = "PresentationAgent"
     foundry_agent_version: str = "2"
 
+    # Microsoft Entra sign-in. Users and documents live in the corporate tenant,
+    # which is deliberately separate from the Foundry tenant used for AI calls.
+    auth_enabled: bool = False
+    auth_tenant_id: str | None = None
+    auth_client_id: str | None = None
+    auth_client_secret: str | None = None
+    auth_redirect_path: str = "/auth/callback"
+
+    # Identity assumed only when auth_enabled is False, for local development.
+    dev_user_upn: str = "local.developer@example.com"
+    dev_user_name: str = "Local Developer"
+
+    # Comma-separated UPNs allowed to approve. Empty means every signed-in user may approve.
+    approver_upns: str = ""
+
+    @property
+    def approvers(self) -> set[str]:
+        return {value.strip().lower() for value in self.approver_upns.split(",") if value.strip()}
+
+    @property
+    def auth_authority(self) -> str:
+        return f"https://login.microsoftonline.com/{self.auth_tenant_id}"
+
+    def auth_is_configured(self) -> bool:
+        return bool(self.auth_tenant_id and self.auth_client_id and self.auth_client_secret)
+
 
 @lru_cache
 def get_settings() -> Settings:

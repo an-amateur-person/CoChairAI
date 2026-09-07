@@ -1,8 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser, require_approver, require_user
 from app.config import get_settings
 from app.db import get_db
+from app.models.meeting import ApprovalEntity
+from app.services.approvals import (
+    ApprovalError,
+    current_status,
+    history,
+    meeting_blockers,
+    record_decision,
+    topic_blockers,
+)
+from app.services.attendees import Attendee, list_topic_attendees, set_topic_attendees
 from app.services.email import EmailDeliveryError
 from app.services.meetings import (
     add_topic_to_meeting,
@@ -17,12 +28,27 @@ from app.services.meetings import (
     update_meeting,
     update_topic,
 )
-from app.api.schemas import AgendaReorder, AgendaTopicLink, MeetingCreate, MeetingRead, MeetingUpdate, MinutesDraft, TopicDraft, TopicRead, TopicUpdate
+from app.api.schemas import (
+    AgendaReorder,
+    AgendaTopicLink,
+    ApprovalDecision,
+    ApprovalRead,
+    AttendeeEntry,
+    MeetingCreate,
+    MeetingRead,
+    MeetingUpdate,
+    MinutesDraft,
+    TopicAttendees,
+    TopicDraft,
+    TopicRead,
+    TopicUpdate,
+)
 
-router = APIRouter(prefix="/api", tags=["system"])
+public_router = APIRouter(prefix="/api", tags=["system"])
+router = APIRouter(prefix="/api", tags=["meetings"], dependencies=[Depends(require_user)])
 
 
-@router.get("/health")
+@public_router.get("/health")
 def health_check() -> dict[str, str]:
     settings = get_settings()
     return {"status": "ok", "application": settings.app_name}
@@ -108,8 +134,141 @@ def post_send_invite(meeting_id: str, database: Session = Depends(get_db)) -> Me
 
 
 @router.post("/meetings/{meeting_id}/approve", response_model=MeetingRead)
-def approve_minutes(meeting_id: str, database: Session = Depends(get_db)) -> MeetingRead:
+def approve_minutes(
+    meeting_id: str,
+    database: Session = Depends(get_db),
+    approver: CurrentUser = Depends(require_approver),
+) -> MeetingRead:
     try:
-        return approve_meeting_minutes(database, meeting_id)
+        return approve_meeting_minutes(database, meeting_id, approver.upn)
     except LookupError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except ApprovalError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+
+_ENTITY_BY_SEGMENT = {
+    "meetings": ApprovalEntity.MEETING,
+    "topics": ApprovalEntity.TOPIC,
+    "actions": ApprovalEntity.ACTION,
+}
+
+
+def _entity_or_404(segment: str) -> ApprovalEntity:
+    entity = _ENTITY_BY_SEGMENT.get(segment)
+    if entity is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown approval scope '{segment}'.",
+        )
+    return entity
+
+
+@router.post("/{segment}/{entity_id}/approvals", response_model=ApprovalRead)
+def post_approval(
+    segment: str,
+    entity_id: str,
+    payload: ApprovalDecision,
+    database: Session = Depends(get_db),
+    approver: CurrentUser = Depends(require_approver),
+) -> ApprovalRead:
+    entity = _entity_or_404(segment)
+    try:
+        record_decision(database, entity, entity_id, payload.status, approver.upn, payload.comments)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except ApprovalError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+    latest = history(database, entity, entity_id)[0]
+    return ApprovalRead(
+        entity_type=entity,
+        entity_id=entity_id,
+        status=latest.status,
+        approver_upn=latest.approver_upn,
+        comments=latest.comments,
+        created_on=latest.created_on,
+    )
+
+
+@router.get("/{segment}/{entity_id}/approvals", response_model=list[ApprovalRead])
+def get_approvals(
+    segment: str,
+    entity_id: str,
+    database: Session = Depends(get_db),
+) -> list[ApprovalRead]:
+    entity = _entity_or_404(segment)
+    return [
+        ApprovalRead(
+            entity_type=entity,
+            entity_id=entity_id,
+            status=record.status,
+            approver_upn=record.approver_upn,
+            comments=record.comments,
+            created_on=record.created_on,
+        )
+        for record in history(database, entity, entity_id)
+    ]
+
+
+@router.get("/{segment}/{entity_id}/approval-blockers", response_model=list[str])
+def get_approval_blockers(
+    segment: str,
+    entity_id: str,
+    database: Session = Depends(get_db),
+) -> list[str]:
+    entity = _entity_or_404(segment)
+    if entity is ApprovalEntity.TOPIC:
+        return topic_blockers(database, entity_id)
+    if entity is ApprovalEntity.MEETING:
+        return meeting_blockers(database, entity_id)
+    return []
+
+
+@router.get("/topics/{topic_id}/attendees", response_model=list[AttendeeEntry])
+def get_topic_attendees(topic_id: str, database: Session = Depends(get_db)) -> list[AttendeeEntry]:
+    return [
+        AttendeeEntry(
+            upn=item.upn,
+            attendee_type=item.attendee_type,
+            display_name=item.display_name,
+            object_id=item.object_id,
+        )
+        for item in list_topic_attendees(database, topic_id)
+    ]
+
+
+@router.put("/topics/{topic_id}/attendees", response_model=list[AttendeeEntry])
+def put_topic_attendees(
+    topic_id: str,
+    payload: TopicAttendees,
+    database: Session = Depends(get_db),
+) -> list[AttendeeEntry]:
+    try:
+        saved = set_topic_attendees(
+            database,
+            topic_id,
+            [
+                Attendee(
+                    upn=item.upn,
+                    attendee_type=item.attendee_type,
+                    display_name=item.display_name,
+                    object_id=item.object_id,
+                )
+                for item in payload.attendees
+            ],
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+    return [
+        AttendeeEntry(
+            upn=item.upn,
+            attendee_type=item.attendee_type,
+            display_name=item.display_name,
+            object_id=item.object_id,
+        )
+        for item in saved
+    ]
