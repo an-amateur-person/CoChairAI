@@ -1,5 +1,6 @@
 import json
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from nicegui import app, run, ui
 
@@ -75,6 +76,9 @@ def _navigation(active_path: str) -> None:
     ui.page_title(get_settings().app_name)
     with ui.header().classes("cochair-header items-center justify-between px-4 md:px-8 shadow-sm"):
         with ui.row().classes("items-center gap-3"):
+            back_button = ui.button(icon="arrow_back", on_click=ui.navigate.back).props("flat round")
+            back_button.tooltip("Back")
+            back_button.classes("text-white/70")
             ui.icon("groups", size="sm").classes("cochair-brand-mark p-2 text-white")
             ui.label(get_settings().app_name).classes("text-lg font-semibold text-white")
         with ui.row().classes("items-center gap-1"):
@@ -259,17 +263,13 @@ def register_home_page() -> None:
                 with SessionLocal() as database:
                     mtg = get_meeting(database, meeting_id)
                 with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl p-6 gap-3"):
-                    edit_mode = {"enabled": False}
+                    edit_mode = {"enabled": True}
                     with ui.row().classes("w-full items-center justify-between"):
                         ui.label(f"Meeting: {mtg.title}").classes("text-lg font-semibold")
-                        edit_agenda_button = ui.button("Edit agenda", icon="edit")
                     attendees_input = ui.textarea("Attendees", value=mtg.attendees).classes("w-full")
                     with ui.row().classes("w-full gap-4"):
                         duration_input = ui.number("Duration (minutes)", value=mtg.duration_minutes or 0, min=1, precision=0).classes("flex-1")
                         location_input = ui.input("Location", value=mtg.location).classes("flex-1")
-                    attendees_input.set_enabled(False)
-                    duration_input.set_enabled(False)
-                    location_input.set_enabled(False)
 
                     ui.separator()
                     agenda_section = ui.column().classes("w-full gap-2")
@@ -386,17 +386,6 @@ def register_home_page() -> None:
 
                     render_agenda_section()
 
-                    def enable_agenda_editing() -> None:
-                        edit_mode["enabled"] = True
-                        edit_agenda_button.set_enabled(False)
-                        attendees_input.set_enabled(True)
-                        duration_input.set_enabled(True)
-                        location_input.set_enabled(True)
-                        save_meeting_button.set_enabled(True)
-                        render_agenda_section()
-
-                    edit_agenda_button.on("click", enable_agenda_editing)
-
                     def save_meeting_details() -> None:
                         try:
                             payload = MeetingUpdate(
@@ -416,20 +405,44 @@ def register_home_page() -> None:
                     with ui.row().classes("w-full justify-end gap-2 mt-4"):
                         ui.button("Cancel", on_click=dialog.close).props("flat")
                         save_meeting_button = ui.button("Save changes", on_click=save_meeting_details, icon="save")
-                        save_meeting_button.set_enabled(False)
                 dialog.open()
 
             def open_create_meeting_dialog() -> None:
+                settings = get_settings()
+                meeting_timezone = ZoneInfo(settings.meeting_timezone)
+                now = datetime.now(meeting_timezone)
+                minutes_to_next_slot = (15 - now.minute % 15) % 15 or 15
+                default_start = (now + timedelta(minutes=minutes_to_next_slot)).replace(second=0, microsecond=0)
+                time_options = {
+                    f"{hour:02d}:{minute:02d}": f"{hour:02d}:{minute:02d}"
+                    for hour in range(24)
+                    for minute in range(0, 60, 15)
+                }
                 with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl p-6 gap-3"):
                     ui.label("Schedule meeting").classes("text-lg font-semibold")
                     title = ui.input("Meeting title").classes("w-full")
-                    starts_at = ui.input("Start (ISO 8601)", value=datetime.now().astimezone().replace(microsecond=0).isoformat()).classes("w-full")
+                    with ui.row().classes("w-full gap-4"):
+                        with ui.input("Date", value=default_start.date().isoformat()).classes("flex-1") as start_date:
+                            with ui.menu().props("no-parent-event") as date_menu:
+                                calendar = ui.date(value=default_start.date().isoformat())
+                                calendar.bind_value(start_date)
+                                calendar.on("update:model-value", lambda _: date_menu.close())
+                            with start_date.add_slot("append"):
+                                date_icon = ui.icon("event").on("click", date_menu.open)
+                                date_icon.tooltip("Choose meeting date")
+                        start_time = ui.select(time_options, value=default_start.strftime("%H:%M"), label="Time").classes("flex-1")
+                    ui.label(f"Times use {settings.meeting_timezone} local time.").classes("text-sm text-gray-600")
                     duration = ui.number("Duration (minutes)", value=60, min=1, precision=0).classes("w-full")
                     attendees = ui.textarea("Attendees", placeholder="person@example.com; other@example.com").classes("w-full")
 
                     def save_meeting() -> None:
                         try:
-                            payload = MeetingCreate(title=title.value, starts_at=starts_at.value, duration_minutes=int(duration.value), attendees=attendees.value)
+                            starts_at = datetime.combine(
+                                date.fromisoformat(start_date.value),
+                                time.fromisoformat(start_time.value),
+                                tzinfo=meeting_timezone,
+                            )
+                            payload = MeetingCreate(title=title.value, starts_at=starts_at, duration_minutes=int(duration.value), attendees=attendees.value)
                             with SessionLocal() as database:
                                 create_meeting(database, payload)
                             table.rows = rows_with_add()
@@ -459,8 +472,8 @@ def register_home_page() -> None:
                 <q-tr v-else :props="props">
                     <q-td v-for="col in props.cols" :key="col.name" :props="props">
                         <template v-if="col.name === 'actions'">
-                            <q-btn round flat dense icon="account_tree" color="primary" @click="() => $parent.$emit('open_meeting', props.row)" />
-                            <q-btn round flat dense icon="edit" color="primary" @click="() => $parent.$emit('edit_meeting', props.row)" />
+                            <q-btn round flat dense icon="account_tree" color="primary" title="Open meeting workspace" @click="() => $parent.$emit('open_meeting', props.row)" />
+                            <q-btn round flat dense icon="edit" color="primary" title="Edit meeting" @click="() => $parent.$emit('edit_meeting', props.row)" />
                         </template>
                         <template v-else>{{ col.value }}</template>
                     </q-td>
@@ -596,7 +609,7 @@ def register_home_page() -> None:
                 </q-tr>
                 <q-tr v-else :props="props">
                     <q-td v-for="col in props.cols" :key="col.name" :props="props">
-                        <q-btn v-if="col.name === 'actions'" round flat dense icon="edit" color="primary" @click="() => $parent.$emit('edit_topic', props.row)" />
+                        <q-btn v-if="col.name === 'actions'" round flat dense icon="edit" color="primary" title="Edit topic" @click="() => $parent.$emit('edit_topic', props.row)" />
                         <template v-else>{{ col.value }}</template>
                     </q-td>
                 </q-tr>

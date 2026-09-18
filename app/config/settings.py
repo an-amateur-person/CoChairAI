@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/cchair.db"
     ui_storage_secret: str = Field(default="development-only-change-me", min_length=16)
     scheduler_timezone: str = "UTC"
+    meeting_timezone: str = "Europe/Berlin"
     reminder_scan_interval_minutes: int = Field(default=15, gt=0)
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, gt=0)

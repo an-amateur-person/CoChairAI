@@ -61,6 +61,7 @@ Edit `.env` with your local configuration:
 - `CCHAIR_DATABASE_URL` - SQLAlchemy database connection string
 - `CCHAIR_UI_STORAGE_SECRET` - Long random secret for session storage (minimum 16 characters)
 - `CCHAIR_SCHEDULER_TIMEZONE` - Timezone for background jobs (e.g., `UTC`, `America/New_York`)
+- `CCHAIR_MEETING_TIMEZONE` - Local timezone used for new meeting date and time selections (default: `Europe/Berlin`)
 - `CCHAIR_REMINDER_SCAN_INTERVAL_MINUTES` - How often to scan for reminders (default: 15)
 
 ### Run the Application
